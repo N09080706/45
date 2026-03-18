@@ -1,138 +1,111 @@
+import sqlite3
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils import executor
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 import os
-import asyncio
-import aiohttp
-from urllib.parse import urlparse
 
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+API_TOKEN = os.getenv("BOT_TOKEN")
 
-import yt_dlp
+bot = Bot(token=API_TOKEN)
+dp = Dispatcher(bot, storage=MemoryStorage())
 
-TOKEN = os.getenv("BOT_TOKEN")
+# ===== DB =====
+conn = sqlite3.connect("db.sqlite3")
+cursor = conn.cursor()
 
-DOWNLOAD_PATH = "downloads"
-os.makedirs(DOWNLOAD_PATH, exist_ok=True)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id INTEGER UNIQUE,
+    full_name TEXT,
+    phone TEXT UNIQUE,
+    language TEXT DEFAULT 'ru'
+)
+""")
+conn.commit()
 
+def user_exists(tg_id):
+    cursor.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,))
+    return cursor.fetchone()
 
-# ====== СКАЧИВАНИЕ ЧЕРЕЗ YT-DLP ======
-async def download_video(url):
-    loop = asyncio.get_event_loop()
+def phone_exists(phone):
+    cursor.execute("SELECT * FROM users WHERE phone=?", (phone,))
+    return cursor.fetchone()
 
-    def ytdlp_download():
-        ydl_opts = {
-            'outtmpl': f'{DOWNLOAD_PATH}/%(title)s.%(ext)s',
-            'format': 'bestvideo+bestaudio/best',
-            'merge_output_format': 'mp4',
-            'noplaylist': True,
-            'quiet': True,
-
-            # 🔥 важные настройки
-            'http_headers': {
-                'User-Agent': 'Mozilla/5.0'
-            },
-            'nocheckcertificate': True,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            return ydl.prepare_filename(info)
-
-    return await loop.run_in_executor(None, ytdlp_download)
-
-
-# ====== СКАЧИВАНИЕ ПРЯМОГО ФАЙЛА ======
-async def download_direct(url):
-    parsed = urlparse(url)
-    filename = os.path.basename(parsed.path) or "file"
-
-    filepath = os.path.join(DOWNLOAD_PATH, filename)
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
-    async with aiohttp.ClientSession(headers=headers) as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise Exception(f"HTTP ошибка: {resp.status}")
-
-            with open(filepath, "wb") as f:
-                async for chunk in resp.content.iter_chunked(1024 * 1024):
-                    f.write(chunk)
-
-    return filepath
-
-
-# ====== /start ======
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📥 Отправь ссылку:\n"
-        "• YouTube / TikTok / Instagram / Pinterest\n"
-        "• или прямую ссылку на файл"
+def add_user(tg_id, full_name, phone):
+    cursor.execute(
+        "INSERT INTO users (tg_id, full_name, phone) VALUES (?, ?, ?)",
+        (tg_id, full_name, phone)
     )
+    conn.commit()
 
+def get_user_id(tg_id):
+    cursor.execute("SELECT id FROM users WHERE tg_id=?", (tg_id,))
+    return cursor.fetchone()
 
-# ====== ОБРАБОТКА ======
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    url = update.message.text.strip()
+# ===== FSM =====
+class Register(StatesGroup):
+    full_name = State()
+    phone = State()
 
-    msg = await update.message.reply_text("⏳ Скачиваю...")
+# ===== KEYBOARD =====
+kb = ReplyKeyboardMarkup(resize_keyboard=True)
+kb.add(KeyboardButton("🏠 Получить адрес"))
 
-    file_path = None
+# ===== START =====
+@dp.message_handler(commands=['start'])
+async def start(msg: types.Message):
+    if user_exists(msg.from_user.id):
+        await msg.answer("✅ Вы уже зарегистрированы!", reply_markup=kb)
+        return
 
-    try:
-        # ===== 1. ПРОБУЕМ YT-DLP =====
-        try:
-            file_path = await download_video(url)
-        except Exception:
-            # ===== 2. FALLBACK → ПРЯМАЯ ССЫЛКА =====
-            try:
-                file_path = await download_direct(url)
-            except Exception:
-                raise Exception("Не удалось скачать ни одним способом")
+    await msg.answer("📝 Введите ФИО:")
+    await Register.full_name.set()
 
-        size = os.path.getsize(file_path)
+# ===== NAME =====
+@dp.message_handler(state=Register.full_name)
+async def get_name(msg: types.Message, state: FSMContext):
+    await state.update_data(full_name=msg.text)
+    await msg.answer("📱 Введите номер телефона:")
+    await Register.phone.set()
 
-        # лимит Telegram
-        if size > 49 * 1024 * 1024:
-            await msg.edit_text("⚠️ Файл слишком большой (>50MB)")
-            os.remove(file_path)
-            return
+# ===== PHONE =====
+@dp.message_handler(state=Register.phone)
+async def get_phone(msg: types.Message, state: FSMContext):
+    phone = msg.text
 
-        ext = file_path.lower()
+    if phone_exists(phone):
+        await msg.answer("❌ Этот номер уже зарегистрирован!")
+        return
 
-        with open(file_path, "rb") as f:
-            if ext.endswith((".mp4", ".mov")):
-                await update.message.reply_video(video=f)
-            elif ext.endswith(".mp3"):
-                await update.message.reply_audio(audio=f)
-            elif ext.endswith((".jpg", ".jpeg", ".png")):
-                await update.message.reply_photo(photo=f)
-            else:
-                await update.message.reply_document(document=f)
+    data = await state.get_data()
 
-        # ===== авто удаление =====
-        os.remove(file_path)
+    add_user(msg.from_user.id, data['full_name'], phone)
 
-        await msg.delete()
+    await msg.answer("✅ Регистрация завершена!", reply_markup=kb)
+    await state.finish()
 
-    except Exception:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
+# ===== ADDRESS =====
+@dp.message_handler(lambda m: m.text == "🏠 Получить адрес")
+async def address(msg: types.Message):
+    user = get_user_id(msg.from_user.id)
 
-        await msg.edit_text("❌ Не удалось скачать файл (ссылка может быть недоступна или защищена)")
+    if not user:
+        await msg.answer("❌ Сначала зарегистрируйтесь через /start")
+        return
 
+    user_id = user[0]
 
-# ====== ЗАПУСК ======
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
+    text = f"""📦 Ваш адрес:
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+X7BOX/{user_id}
+18042568166 浙江省金华市义乌市 义乌市福田街道物华路68号  肖志华  Dabex 0077 / X7BOX/{user_id}
+"""
 
-    print("Бот запущен...")
-    app.run_polling()
-
+    await msg.answer(text)
 
 if __name__ == "__main__":
-    main()
+    executor.start_polling(dp)
