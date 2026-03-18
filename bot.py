@@ -1,21 +1,24 @@
 import sqlite3
+import os
+
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.utils import executor
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
-import os
 
+# ===== TOKEN =====
 API_TOKEN = os.getenv("BOT_TOKEN")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot, storage=MemoryStorage())
 
-# ===== DB =====
+# ===== DATABASE =====
 conn = sqlite3.connect("db.sqlite3")
 cursor = conn.cursor()
 
+# USERS
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,8 +28,20 @@ CREATE TABLE IF NOT EXISTS users (
     language TEXT DEFAULT 'ru'
 )
 """)
+
+# TRACKS
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_code TEXT UNIQUE,
+    status TEXT,
+    date TEXT
+)
+""")
+
 conn.commit()
 
+# ===== FUNCTIONS =====
 def user_exists(tg_id):
     cursor.execute("SELECT * FROM users WHERE tg_id=?", (tg_id,))
     return cursor.fetchone()
@@ -51,9 +66,15 @@ class Register(StatesGroup):
     full_name = State()
     phone = State()
 
+class TrackSearch(StatesGroup):
+    waiting_for_track = State()
+
 # ===== KEYBOARD =====
 kb = ReplyKeyboardMarkup(resize_keyboard=True)
-kb.add(KeyboardButton("🏠 Получить адрес"))
+kb.add(
+    KeyboardButton("📦 Проверить трек"),
+    KeyboardButton("🏠 Получить адрес")
+)
 
 # ===== START =====
 @dp.message_handler(commands=['start'])
@@ -75,7 +96,7 @@ async def get_name(msg: types.Message, state: FSMContext):
 # ===== PHONE =====
 @dp.message_handler(state=Register.phone)
 async def get_phone(msg: types.Message, state: FSMContext):
-    phone = msg.text
+    phone = msg.text.strip()
 
     if phone_exists(phone):
         await msg.answer("❌ Этот номер уже зарегистрирован!")
@@ -107,5 +128,42 @@ X7BOX/{user_id}
 
     await msg.answer(text)
 
+# ===== ASK TRACK =====
+@dp.message_handler(lambda m: m.text == "📦 Проверить трек")
+async def ask_track(msg: types.Message):
+    await msg.answer("📦 Введите трек-код:")
+    await TrackSearch.waiting_for_track.set()
+
+# ===== CHECK TRACK =====
+@dp.message_handler(state=TrackSearch.waiting_for_track)
+async def check_track(msg: types.Message, state: FSMContext):
+    track = msg.text.strip()
+
+    cursor.execute(
+        "SELECT status, date FROM tracks WHERE track_code=?",
+        (track,)
+    )
+    result = cursor.fetchone()
+
+    if result:
+        status, date = result
+        text = f"""📦 Трек: {track}
+📍 Статус: {status}
+📅 Дата: {date}"""
+    else:
+        text = "❌ Трек не найден"
+
+    await msg.answer(text, reply_markup=kb)
+    await state.finish()
+
+# ===== TEMP TEST DATA =====
+# (можешь удалить позже)
+cursor.execute(
+    "INSERT OR IGNORE INTO tracks (track_code, status, date) VALUES (?, ?, ?)",
+    ("ABC123", "На складе", "18.03.2026")
+)
+conn.commit()
+
+# ===== RUN =====
 if __name__ == "__main__":
     executor.start_polling(dp)
