@@ -37,30 +37,24 @@ async def download_video(url):
 # ====== СКАЧИВАНИЕ ПРЯМОГО ФАЙЛА ======
 async def download_direct(url):
     parsed = urlparse(url)
-    filename = os.path.basename(parsed.path)
-
-    if not filename:
-        filename = "file"
+    filename = os.path.basename(parsed.path) or "file"
 
     filepath = os.path.join(DOWNLOAD_PATH, filename)
 
-    async with aiohttp.ClientSession() as session:
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(url) as resp:
-            resp.raise_for_status()
+            if resp.status != 200:
+                raise Exception(f"HTTP ошибка: {resp.status}")
 
             with open(filepath, "wb") as f:
                 async for chunk in resp.content.iter_chunked(1024 * 1024):
                     f.write(chunk)
 
     return filepath
-
-
-# ====== ПРОВЕРКА НА ПРЯМОЙ ФАЙЛ ======
-def is_direct_file(url):
-    return any(url.lower().endswith(ext) for ext in [
-        ".mp4", ".mp3", ".zip", ".rar", ".pdf",
-        ".jpg", ".jpeg", ".png", ".apk", ".mov"
-    ])
 
 
 # ====== /start ======
@@ -72,18 +66,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ====== ОБРАБОТКА ССЫЛКИ ======
+# ====== ОБРАБОТКА ======
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
 
     msg = await update.message.reply_text("⏳ Скачиваю...")
 
+    file_path = None
+
     try:
-        # выбор способа
-        if is_direct_file(url):
-            file_path = await download_direct(url)
-        else:
+        # ===== СНАЧАЛА ПРОБУЕМ YT-DLP =====
+        try:
             file_path = await download_video(url)
+        except Exception:
+            # ===== ЕСЛИ НЕ ПОЛУЧИЛОСЬ → ПРЯМАЯ ССЫЛКА =====
+            file_path = await download_direct(url)
 
         size = os.path.getsize(file_path)
 
@@ -105,13 +102,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_document(document=f)
 
-        # ====== авто удаление ======
+        # ===== АВТО УДАЛЕНИЕ =====
         os.remove(file_path)
 
         await msg.delete()
 
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка:\n{e}")
+        if file_path and os.path.exists(file_path):
+            os.remove(file_path)
+
+        await msg.edit_text(f"❌ Не удалось скачать\n\n{str(e)[:300]}")
 
 
 # ====== ЗАПУСК ======
