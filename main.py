@@ -1,21 +1,22 @@
 from fastapi import FastAPI
 import sqlite3
-from aiogram import Bot
 import os
+from aiogram import Bot
 
 app = FastAPI()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 
-# ===== DB =====
+ADMIN_TOKEN = "SECRET123"
+
 def get_db():
     return sqlite3.connect("db.sqlite3")
 
-# ===== AUTH =====
-ADMIN_TOKEN = "SECRET123"
+@app.get("/")
+def root():
+    return {"status": "API WORKING"}
 
-# ===== GET CLIENTS =====
 @app.get("/clients")
 def get_clients(token: str):
     if token != ADMIN_TOKEN:
@@ -31,7 +32,6 @@ def get_clients(token: str):
 
     return {"clients": data}
 
-# ===== ADD TRACKS =====
 @app.post("/add-tracks")
 def add_tracks(token: str, tracks: str, date: str):
     if token != ADMIN_TOKEN:
@@ -39,6 +39,15 @@ def add_tracks(token: str, tracks: str, date: str):
 
     conn = get_db()
     cursor = conn.cursor()
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tracks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        track_code TEXT UNIQUE,
+        status TEXT,
+        date TEXT
+    )
+    """)
 
     track_list = tracks.split("\n")
 
@@ -55,7 +64,6 @@ def add_tracks(token: str, tracks: str, date: str):
 
     return {"status": "ok"}
 
-# ===== BROADCAST =====
 @app.post("/broadcast")
 async def broadcast(token: str, message: str):
     if token != ADMIN_TOKEN:
