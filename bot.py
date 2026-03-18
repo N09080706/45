@@ -25,6 +25,12 @@ async def download_video(url):
             'merge_output_format': 'mp4',
             'noplaylist': True,
             'quiet': True,
+
+            # 🔥 важные настройки
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0'
+            },
+            'nocheckcertificate': True,
         }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -75,12 +81,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path = None
 
     try:
-        # ===== СНАЧАЛА ПРОБУЕМ YT-DLP =====
+        # ===== 1. ПРОБУЕМ YT-DLP =====
         try:
             file_path = await download_video(url)
         except Exception:
-            # ===== ЕСЛИ НЕ ПОЛУЧИЛОСЬ → ПРЯМАЯ ССЫЛКА =====
-            file_path = await download_direct(url)
+            # ===== 2. FALLBACK → ПРЯМАЯ ССЫЛКА =====
+            try:
+                file_path = await download_direct(url)
+            except Exception:
+                raise Exception("Не удалось скачать ни одним способом")
 
         size = os.path.getsize(file_path)
 
@@ -102,16 +111,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await update.message.reply_document(document=f)
 
-        # ===== АВТО УДАЛЕНИЕ =====
+        # ===== авто удаление =====
         os.remove(file_path)
 
         await msg.delete()
 
-    except Exception as e:
+    except Exception:
         if file_path and os.path.exists(file_path):
             os.remove(file_path)
 
-        await msg.edit_text(f"❌ Не удалось скачать\n\n{str(e)[:300]}")
+        await msg.edit_text("❌ Не удалось скачать файл (ссылка может быть недоступна или защищена)")
 
 
 # ====== ЗАПУСК ======
