@@ -4,7 +4,10 @@ import os
 from aiogram import Bot
 
 app = FastAPI()
-
+@app.get("/")
+def root():
+    return {"status": "API WORKING"}
+    
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 bot = Bot(token=BOT_TOKEN)
 
